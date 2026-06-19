@@ -1,0 +1,366 @@
+<!doctype html>
+<html lang="en" class="scroll-smooth">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Splitwise-QUIC · Architecture</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+  <style>
+    /* Make Mermaid SVGs scale nicely and stay legible */
+    .mermaid { display: flex; justify-content: center; }
+    .mermaid svg { max-width: 100%; height: auto; }
+    html { scroll-padding-top: 5rem; }
+  </style>
+</head>
+<body class="bg-slate-50 text-slate-800 antialiased">
+
+  <!-- Top nav -->
+  <header class="sticky top-0 z-30 border-b border-slate-200 bg-white/90 backdrop-blur">
+    <div class="mx-auto flex max-w-6xl items-center justify-between px-4 py-3">
+      <a href="#top" class="flex items-center gap-2 font-bold tracking-tight text-emerald-700">
+        <span class="text-xl">Splitwise<span class="text-emerald-500">·QUIC</span></span>
+      </a>
+      <nav class="hidden gap-5 text-sm font-medium text-slate-600 sm:flex">
+        <a href="#system" class="hover:text-emerald-700">System</a>
+        <a href="#lifecycle" class="hover:text-emerald-700">Request flow</a>
+        <a href="#quic" class="hover:text-emerald-700">QUIC upgrade</a>
+        <a href="#realtime" class="hover:text-emerald-700">Real-time</a>
+        <a href="#data" class="hover:text-emerald-700">Data model</a>
+        <a href="#layers" class="hover:text-emerald-700">Layers</a>
+      </nav>
+    </div>
+  </header>
+
+  <main id="top" class="mx-auto max-w-6xl px-4 py-10">
+
+    <!-- Hero -->
+    <section class="mb-12 text-center">
+      <h1 class="text-3xl font-extrabold tracking-tight text-slate-900 sm:text-4xl">
+        Splitwise-QUIC — Architecture
+      </h1>
+      <p class="mx-auto mt-3 max-w-2xl text-slate-600">
+        A Splitwise clone served <strong>entirely over HTTP/3 + QUIC</strong>, with real-time
+        updates pushed as <strong>QUIC DATAGRAM frames</strong> over WebTransport.
+        Below are the system, request lifecycle, QUIC upgrade, real-time, and data diagrams.
+      </p>
+      <div class="mt-5 flex flex-wrap justify-center gap-2 text-xs font-semibold">
+        <span class="rounded-full bg-emerald-100 px-3 py-1 text-emerald-800">Go 1.26</span>
+        <span class="rounded-full bg-orange-100 px-3 py-1 text-orange-800">HTTP/3 · QUIC</span>
+        <span class="rounded-full bg-purple-100 px-3 py-1 text-purple-800">WebTransport</span>
+        <span class="rounded-full bg-sky-100 px-3 py-1 text-sky-800">HTMX + Tailwind</span>
+        <span class="rounded-full bg-blue-100 px-3 py-1 text-blue-900">SQLite (pure-Go)</span>
+        <span class="rounded-full bg-slate-200 px-3 py-1 text-slate-800">quic-go 0.60</span>
+      </div>
+    </section>
+
+    <!-- System architecture -->
+    <section id="system" class="mb-14">
+      <div class="mb-4">
+        <h2 class="text-2xl font-bold text-slate-900">1 · System architecture</h2>
+        <p class="mt-1 text-slate-600">
+          The browser bootstraps over HTTP/2 (TCP), then upgrades to HTTP/3 (QUIC) via the
+          <code class="rounded bg-slate-100 px-1">Alt-Svc</code> header. A separate WebTransport
+          session carries live updates as QUIC datagrams.
+        </p>
+      </div>
+      <div class="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+        <pre class="mermaid">
+flowchart TB
+    subgraph Client["BROWSER"]
+        direction TB
+        UI["HTMX + Tailwind UI"]
+        JS["app.js<br/>proto badge · split UX · toasts"]
+        WTC["WebTransport client<br/>(QUIC datagrams)"]
+    end
+
+    subgraph Server["GO SERVER · :4433 (TCP + UDP)"]
+        direction TB
+        TCP["TCP listener<br/>HTTP/1.1 + HTTP/2"]
+        UDP["UDP listener<br/>HTTP/3 + QUIC"]
+        WT["webtransport.Server<br/>(wraps http3.Server)"]
+        ALT["Alt-Svc middleware<br/>advertise h3"]
+        MUX["http.ServeMux<br/>+ auth middleware"]
+        H["Handlers<br/>pages · actions · partials · realtime"]
+        RT["realtime.Hub<br/>pub/sub fan-out"]
+        ST["store<br/>persistence"]
+        SP["splits<br/>money math + debt"]
+        RN["render<br/>embedded templates + assets"]
+    end
+
+    DB[("SQLite · WAL<br/>users · groups · expenses<br/>shares · settlements · activity")]
+
+    UI -->|"1 · HTTP/2 bootstrap"| TCP
+    UI -->|"2 · HTTP/3 after Alt-Svc"| UDP
+    WTC -->|"QUIC DATAGRAMs"| WT
+    UDP --> WT
+    TCP --> ALT
+    WT --> ALT
+    ALT --> MUX --> H
+    H --> RN
+    H --> SP
+    H --> ST --> DB
+    H -->|publish event| RT
+    RT -->|SSE stream| UI
+    RT -.->|datagram push| WTC
+
+    classDef client fill:#ecfdf5,stroke:#10b981,color:#065f46;
+    classDef server fill:#f8fafc,stroke:#64748b,color:#1e293b;
+    classDef store fill:#eff6ff,stroke:#3b82f6,color:#1e3a8a;
+    class UI,JS,WTC client;
+    class TCP,UDP,WT,ALT,MUX,H,RT,ST,SP,RN server;
+    class DB store;
+        </pre>
+      </div>
+    </section>
+
+    <!-- Request lifecycle -->
+    <section id="lifecycle" class="mb-14">
+      <div class="mb-4">
+        <h2 class="text-2xl font-bold text-slate-900">2 · Request lifecycle (add an expense)</h2>
+        <p class="mt-1 text-slate-600">
+          A POST mutates the DB, logs activity, and broadcasts an event that refreshes every
+          connected client's balances in real time.
+        </p>
+      </div>
+      <div class="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+        <pre class="mermaid">
+sequenceDiagram
+    autonumber
+    actor U as User (browser)
+    participant H3 as HTTP/3 server
+    participant MW as Auth middleware
+    participant HD as createExpense handler
+    participant SP as splits.Compute
+    participant ST as store
+    participant DB as SQLite
+    participant HUB as realtime.Hub
+    participant O as Other clients
+
+    U->>H3: POST /g/{id}/expenses (over QUIC)
+    H3->>MW: route + verify session cookie
+    MW->>HD: authorized request
+    HD->>HD: parse amount, currency, split inputs
+    HD->>SP: Compute(total, splitType, inputs)
+    SP-->>HD: per-user shares (exact sum)
+    HD->>ST: CreateExpense(expense, shares)
+    ST->>DB: INSERT expense + shares (tx)
+    DB-->>ST: ok
+    HD->>ST: LogActivity(...)
+    HD->>HUB: Publish(expense event)
+    HUB-->>O: SSE "update" + QUIC datagram
+    O->>H3: hx-get /balances (auto refresh)
+    HD-->>U: 303 redirect -> group page
+        </pre>
+      </div>
+    </section>
+
+    <!-- QUIC upgrade -->
+    <section id="quic" class="mb-14">
+      <div class="mb-4">
+        <h2 class="text-2xl font-bold text-slate-900">3 · TCP &rarr; QUIC upgrade &amp; handshake</h2>
+        <p class="mt-1 text-slate-600">
+          How a browser discovers and switches to HTTP/3, including 0-RTT resumption on reconnect.
+        </p>
+      </div>
+      <div class="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+        <pre class="mermaid">
+sequenceDiagram
+    autonumber
+    participant B as Browser
+    participant T as TCP :4433 (HTTP/2)
+    participant Q as UDP :4433 (QUIC/HTTP3)
+
+    Note over B,T: First visit
+    B->>T: TLS 1.3 handshake + GET /login
+    T-->>B: 200 OK + Alt-Svc: h3=":4433"; ma=2592000
+    Note over B: Caches the h3 advert
+
+    Note over B,Q: Subsequent requests
+    B->>Q: QUIC Initial (1-RTT) + TLS 1.3 (ALPN "h3")
+    Q-->>B: handshake + session ticket (for 0-RTT)
+    B->>Q: HTTP/3 requests (multiplexed streams)
+
+    Note over B,Q: Reconnect later
+    B->>Q: QUIC 0-RTT (early data, no extra RTT)
+    Q-->>B: accept early data
+    Note over B,Q: Connection migration:<br/>QUIC keeps the session across IP changes
+        </pre>
+      </div>
+    </section>
+
+    <!-- Real-time -->
+    <section id="realtime" class="mb-14">
+      <div class="mb-4">
+        <h2 class="text-2xl font-bold text-slate-900">4 · Real-time update fan-out</h2>
+        <p class="mt-1 text-slate-600">
+          One in-memory hub feeds both channels: QUIC datagrams (fast lane) and SSE (fallback).
+        </p>
+      </div>
+      <div class="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+        <pre class="mermaid">
+flowchart LR
+    M["Mutation handler<br/>(expense / settle / member)"] -->|Publish event| HUB["realtime.Hub"]
+
+    HUB -->|"buffered chan"| S1["SSE subscriber<br/>(HTMX sse ext)"]
+    HUB -->|"buffered chan"| S2["WebTransport session<br/>(QUIC datagrams)"]
+
+    S1 -->|"event: update"| C1["Browser A<br/>hx-get partials"]
+    S2 -->|"datagram bytes"| C2["Browser B<br/>htmx.trigger + toast"]
+
+    classDef hub fill:#ecfdf5,stroke:#10b981,color:#065f46;
+    classDef node fill:#f8fafc,stroke:#64748b,color:#1e293b;
+    class HUB hub;
+    class M,S1,S2,C1,C2 node;
+        </pre>
+      </div>
+    </section>
+
+    <!-- Data model -->
+    <section id="data" class="mb-14">
+      <div class="mb-4">
+        <h2 class="text-2xl font-bold text-slate-900">5 · Data model</h2>
+        <p class="mt-1 text-slate-600">
+          Money stored as integer minor units (cents). Balances are derived from expenses,
+          shares, and settlements — never stored.
+        </p>
+      </div>
+      <div class="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+        <pre class="mermaid">
+erDiagram
+    USERS ||--o{ SESSIONS : has
+    USERS ||--o{ GROUP_MEMBERS : joins
+    GROUPS ||--o{ GROUP_MEMBERS : contains
+    GROUPS ||--o{ EXPENSES : has
+    GROUPS ||--o{ SETTLEMENTS : has
+    GROUPS ||--o{ ACTIVITIES : has
+    USERS ||--o{ EXPENSES : pays
+    EXPENSES ||--o{ EXPENSE_SHARES : split_into
+    USERS ||--o{ EXPENSE_SHARES : owes
+
+    USERS {
+        text id PK
+        text email UK
+        text name
+        text password_hash
+    }
+    GROUPS {
+        text id PK
+        text name
+        text owner_id FK
+    }
+    GROUP_MEMBERS {
+        text group_id FK
+        text user_id FK
+    }
+    EXPENSES {
+        text id PK
+        text group_id FK
+        text paid_by FK
+        text description
+        int amount "minor units"
+        text currency
+        text split_type
+    }
+    EXPENSE_SHARES {
+        text expense_id FK
+        text user_id FK
+        int amount "minor units"
+    }
+    SETTLEMENTS {
+        text id PK
+        text group_id FK
+        text from_user FK
+        text to_user FK
+        int amount
+        text currency
+    }
+    ACTIVITIES {
+        text id PK
+        text group_id FK
+        text actor_id FK
+        text verb
+    }
+        </pre>
+      </div>
+    </section>
+
+    <!-- Layers -->
+    <section id="layers" class="mb-14">
+      <div class="mb-4">
+        <h2 class="text-2xl font-bold text-slate-900">6 · Package layering</h2>
+        <p class="mt-1 text-slate-600">
+          Clean dependency direction: handlers depend on store/splits/render; the
+          <code class="rounded bg-slate-100 px-1">splits</code> package is pure (no I/O).
+        </p>
+      </div>
+      <div class="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+        <pre class="mermaid">
+flowchart TD
+    MAIN["main.go"] --> SRV["internal/server<br/>QUIC/HTTP3 + TLS"]
+    MAIN --> HND["internal/handlers"]
+    MAIN --> DBP["internal/db"]
+    MAIN --> RND["internal/render"]
+    MAIN --> RTM["internal/realtime"]
+
+    HND --> SRV
+    HND --> STO["internal/store"]
+    HND --> SPL["internal/splits"]
+    HND --> RND
+    HND --> RTM
+    HND --> MOD["internal/models"]
+
+    STO --> SPL
+    STO --> MOD
+    SPL --> MOD
+    DBP --> STO
+
+    classDef pure fill:#ecfdf5,stroke:#10b981,color:#065f46;
+    classDef io fill:#eff6ff,stroke:#3b82f6,color:#1e3a8a;
+    classDef core fill:#f8fafc,stroke:#64748b,color:#1e293b;
+    class SPL,MOD pure;
+    class STO,DBP,SRV io;
+    class MAIN,HND,RND,RTM core;
+        </pre>
+      </div>
+    </section>
+
+    <!-- Legend / notes -->
+    <section class="mb-6 rounded-2xl border border-emerald-200 bg-emerald-50 p-5">
+      <h3 class="mb-2 font-bold text-emerald-900">Key takeaways</h3>
+      <ul class="list-disc space-y-1 pl-5 text-sm text-emerald-900">
+        <li><strong>One port, two transports:</strong> TCP (h1/h2) and UDP (h3/QUIC) both on <code>:4433</code>.</li>
+        <li><strong>Two live channels:</strong> QUIC datagrams (WebTransport) as the fast lane, SSE as the fallback.</li>
+        <li><strong>Pure money math:</strong> the <code>splits</code> package has zero I/O and is fully unit-tested.</li>
+        <li><strong>Derived balances:</strong> never stored — always computed from expenses + settlements per currency.</li>
+        <li><strong>Self-contained:</strong> templates &amp; assets embedded; pure-Go SQLite; single binary.</li>
+      </ul>
+    </section>
+
+  </main>
+
+  <footer class="border-t border-slate-200 bg-white">
+    <div class="mx-auto max-w-6xl px-4 py-6 text-center text-xs text-slate-400">
+      Splitwise-QUIC · architecture overview · rendered with Mermaid
+    </div>
+  </footer>
+
+  <script>
+    mermaid.initialize({
+      startOnLoad: true,
+      theme: "base",
+      themeVariables: {
+        primaryColor: "#ecfdf5",
+        primaryTextColor: "#0f172a",
+        primaryBorderColor: "#10b981",
+        lineColor: "#64748b",
+        fontFamily: "ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif",
+        fontSize: "14px"
+      },
+      flowchart: { curve: "basis", htmlLabels: true, useMaxWidth: true },
+      sequence: { useMaxWidth: true, mirrorActors: false },
+      er: { useMaxWidth: true }
+    });
+  </script>
+</body>
+</html>

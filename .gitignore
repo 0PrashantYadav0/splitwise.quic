@@ -1,0 +1,18 @@
+vendor
+.vscode
+
+# Binaries
+/splitwise-quic
+*.exe
+
+# SQLite database + WAL files
+splitwise.db
+splitwise.db-wal
+splitwise.db-shm
+*.db
+
+# Env / secrets
+.env
+
+# OS noise
+.DS_Store
