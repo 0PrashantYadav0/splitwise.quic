@@ -16,3 +16,6 @@ splitwise.db-shm
 
 # OS noise
 .DS_Store
+
+# Uploaded receipts (may contain PII)
+uploads/

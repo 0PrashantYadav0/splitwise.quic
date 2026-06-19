@@ -31,7 +31,12 @@ import (
 func main() {
 	addr := flag.String("addr", ":4433", "host:port to listen on (TCP+UDP)")
 	dbPath := flag.String("db", "splitwise.db", "path to the SQLite database file")
+	uploads := flag.String("uploads", "uploads", "directory for uploaded receipt images")
 	flag.Parse()
+
+	if err := os.MkdirAll(*uploads, 0o755); err != nil {
+		log.Fatalf("uploads dir: %v", err)
+	}
 
 	database, err := db.Open(*dbPath)
 	if err != nil {
@@ -46,7 +51,7 @@ func main() {
 
 	st := store.New(database)
 	hub := realtime.NewHub()
-	h := handlers.New(st, renderer, hub)
+	h := handlers.New(st, renderer, hub, *uploads)
 
 	cfg := server.Config{
 		Addr:              *addr,
