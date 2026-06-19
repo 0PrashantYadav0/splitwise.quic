@@ -22,20 +22,29 @@ Shared-expense tracking with real-time updates delivered as **QUIC DATAGRAM fram
 
 ##  Table of contents
 
-- [What is this?](#-what-is-this)
-- [Highlights](#-highlights)
-- [Architecture](#-architecture)
-- [The QUIC techniques](#-the-quic-techniques)
-- [Splitwise features](#-splitwise-features)
-- [Quick start](#-quick-start)
-- [Verifying HTTP/3](#-verifying-http3)
-- [Project layout](#-project-layout)
-- [How it works](#-how-it-works)
-- [Configuration](#-configuration)
-- [Testing](#-testing)
-- [Design decisions](#-design-decisions)
-- [Troubleshooting](#-troubleshooting)
-- [Roadmap](#-roadmap)
+- [Splitwise-QUIC](#splitwise-quic)
+    - [A Splitwise clone that talks to your browser **entirely over HTTP/3 + QUIC**](#a-splitwise-clone-that-talks-to-your-browser-entirely-over-http3--quic)
+  - [Table of contents](#table-of-contents)
+  - [What is this?](#what-is-this)
+  - [Highlights](#highlights)
+  - [Architecture](#architecture)
+  - [The QUIC techniques](#the-quic-techniques)
+  - [Splitwise features](#splitwise-features)
+  - [Quick start](#quick-start)
+    - [Run with Docker](#run-with-docker)
+    - [Deploy to Kubernetes](#deploy-to-kubernetes)
+  - [Verifying HTTP/3](#verifying-http3)
+  - [Project layout](#project-layout)
+  - [How it works](#how-it-works)
+    - [The TCP -\> QUIC upgrade dance](#the-tcp---quic-upgrade-dance)
+    - [Real-time updates (two channels)](#real-time-updates-two-channels)
+    - [Money, the right way](#money-the-right-way)
+    - [Debt simplification](#debt-simplification)
+  - [Configuration](#configuration)
+  - [Testing](#testing)
+  - [Design decisions](#design-decisions)
+  - [Troubleshooting](#troubleshooting)
+  - [Roadmap](#roadmap)
 
 ---
 
@@ -65,7 +74,7 @@ that happens to be an end-to-end QUIC showcase.
 |  **Correct money math** | Integer minor units everywhere; zero lost pennies across any split. |
 |  **4 split modes** | Equal, exact, percentage, and weighted shares. |
 |  **Multi-currency** | Each currency's balances tracked and simplified independently. |
-|  **Debt simplification** | Greedy cash-flow minimization — the same idea Splitwise ships. |
+|  **Debt simplification** | Max-heap greedy cash-flow minimization — O(n log n), ≤ n+m-1 transfers guaranteed. |
 |  **Self-contained binary** | Templates + static assets embedded via `go:embed`; pure-Go SQLite (no cgo). |
 |  **Zero-config TLS** | Fresh short-lived ECDSA cert minted on every boot for WebTransport cert-hash pinning. |
 
@@ -124,6 +133,8 @@ This project intentionally stacks the "hard" parts of QUIC into one app:
 | **0-RTT** session resumption | `quic.Config{ Allow0RTT: true }` |
 | **QUIC DATAGRAMs** (RFC 9221) | `EnableDatagrams: true` + WebTransport push |
 | **WebTransport** live channel (browser) | `internal/handlers/realtime.go`, `static/app.js` |
+| **Per-user push** over datagrams | topic-based `realtime.Hub` + `/wt` endpoint |
+| Receipt upload **over a QUIC stream** | multipart body on HTTP/3 = a dedicated stream |
 | **Stream multiplexing** tuned high | `MaxIncomingStreams: 512` (no head-of-line blocking) |
 | **Connection migration** friendliness | keep-alive + QUIC path validation |
 | **Alt-Svc** TCP -> QUIC upgrade hint | `withAltSvc` middleware |
@@ -144,8 +155,15 @@ This project intentionally stacks the "hard" parts of QUIC into one app:
 - **Multi-currency** — balances computed per currency, never mixed
 - **Debt simplification** — minimizes the number of "who pays whom" transfers
 - **Settle-up** — record direct payments that clear balances
+- **Expense editing** — edit any expense in place (htmx-swapped form, re-computes shares)
+- **Comments** — threaded notes on each expense
+- **Receipt uploads** — attach a photo to an expense (streamed over QUIC)
+- **CSV / PDF export** — download a group's expenses (CSV) or a full report (PDF)
 - **Activity feed** — human-readable audit trail per group
 - **Real-time** — instant UI refresh via QUIC datagrams (WebTransport) or SSE
+- **Per-user push notifications** — personal alerts delivered as QUIC datagrams
+  on *any* page (added to a group, a new expense, a settlement)
+- **Dark / light mode** — starfield theme with a persistent toggle
 
 ---
 
@@ -167,8 +185,30 @@ Build a binary instead:
 
 ```bash
 go build -o splitwise-quic .
-./splitwise-quic -addr :4433 -db splitwise.db
+./splitwise-quic -addr :4433 -db splitwise.db -uploads uploads
 ```
+
+### Run with Docker
+
+```bash
+docker compose up --build
+# or, on a restricted module-proxy network:
+# docker build --build-arg GOPROXY=direct -t splitwise-quic .
+```
+
+Then open **<https://localhost:4433>**. The SQLite DB and uploaded receipts
+persist in the `sqquic-data` volume.
+
+### Deploy to Kubernetes
+
+```bash
+kubectl apply -f deploy/k8s.yaml
+```
+
+Runs as a single replica (SQLite is single-writer) with a `ReadWriteOnce` PVC
+for `/data`. Liveness/readiness probes hit `/healthz`. Note that QUIC needs the
+UDP port exposed alongside TCP — a mixed-protocol LoadBalancer (k8s 1.26+) or
+two Services.
 
 ---
 
@@ -210,9 +250,14 @@ splitwise-quic/
 │   ├── server/              # QUIC/HTTP3 transport, TLS, Alt-Svc, listeners
 │   ├── realtime/            # in-memory pub/sub hub
 │   ├── render/              # embedded templates (HTMX) + static assets (JS)
-│   └── handlers/            # HTTP handlers, routing, SSE, WebTransport
+│   └── handlers/            # HTTP handlers, routing, SSE, WebTransport,
+│                            #   edit/comments/receipts/export
+├── deploy/
+│   └── k8s.yaml             # Kubernetes Deployment + Service + PVC
 ├── docs/
 │   └── architecture.html    # interactive Mermaid architecture diagrams
+├── Dockerfile               # multi-stage, distroless, non-root
+├── docker-compose.yml
 └── README.md
 ```
 
@@ -250,9 +295,34 @@ the exact total.
 
 ### Debt simplification
 
-Net balances per currency feed a greedy **cash-flow minimization** heuristic:
-repeatedly settle the biggest creditor against the biggest debtor. It produces
-near-minimal transfers (the approach Splitwise itself uses).
+Net balances per currency feed a **max-heap greedy cash-flow minimization** algorithm
+(`internal/splits/simplify.go`):
+
+1. Build two max-heaps — one for creditors (net > 0), one for debtors (net < 0).
+2. At each step, pop the **largest creditor** and **largest debtor**.
+3. Settle `min(debtor, creditor)` between them, then re-insert whichever side has a remainder.
+4. Repeat until both heaps are empty.
+
+This guarantees at most **n + m − 1 transfers** (the theoretical minimum for n debtors and
+m creditors), while always re-evaluating the largest remaining obligation after every partial
+payment — something a sort-once two-pointer scan cannot do. Time: **O(n log n)**. Space: **O(n)**.
+
+**Error handling:** zero-balance entries are skipped; an imbalanced ledger (sum ≠ 0) is logged
+but does not abort — the algorithm clears as much debt as possible.
+
+### Split error handling
+
+`splits.Compute` returns typed sentinel errors (use `errors.Is`):
+
+| Error | Trigger |
+|---|---|
+| `ErrNonPositiveTotal` | Total ≤ 0 |
+| `ErrEmptyInputs` | No participants |
+| `ErrDuplicateUser` | Same UserID appears twice |
+| `ErrNegativeValue` | Negative amount/weight/percentage |
+| `ErrOverflow` | `total × share-weight` exceeds int64 |
+| `ErrBadSplit` | Exact amounts or percentages don't reconcile |
+| `ErrInvalidSplitType` | Unknown split type string |
 
 ---
 
@@ -262,6 +332,7 @@ near-minimal transfers (the approach Splitwise itself uses).
 |---|---|---|
 | `-addr` | `:4433` | Listen address (used for **both** TCP and UDP) |
 | `-db` | `splitwise.db` | SQLite database file path |
+| `-uploads` | `uploads` | Directory for uploaded receipt images |
 | `REQUIRE_MTLS` | _unset_ | Set to `1` to require mutual TLS (clients must present a cert) |
 
 ---
@@ -308,11 +379,11 @@ reconciliation, percentage basis points, weighted shares, and minimal transfers.
 
 ##  Roadmap
 
-- [ ] Expense editing & comments
-- [ ] Receipt photo uploads (over QUIC streams)
-- [ ] Per-user push notifications via datagrams
-- [ ] CSV / PDF export
-- [ ] Dockerfile + deployment manifest
+- [x] Expense editing & comments
+- [x] Receipt photo uploads (over QUIC streams)
+- [x] Per-user push notifications via datagrams
+- [x] CSV / PDF export
+- [x] Dockerfile + deployment manifest
 
 ---
 
