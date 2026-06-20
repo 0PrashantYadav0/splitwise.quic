@@ -1,0 +1,96 @@
+# Splitwise-QUIC - Kubernetes manifest.
+#
+#   kubectl apply -f deploy/k8s.yaml
+#
+# IMPORTANT:
+#   * QUIC needs the UDP port exposed alongside TCP. A LoadBalancer that fronts
+#     both protocols on one Service requires the MixedProtocolLBService feature
+#     (GA since k8s 1.26). On older clusters, split into two Services.
+#   * SQLite is a single-writer embedded DB, so this runs as a single replica
+#     with a ReadWriteOnce volume. Don't scale replicas > 1 with this storage.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: splitwise-quic
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: splitwise-quic-data
+  namespace: splitwise-quic
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: splitwise-quic
+  namespace: splitwise-quic
+  labels: { app: splitwise-quic }
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate # single RWO volume - no rolling overlap
+  selector:
+    matchLabels: { app: splitwise-quic }
+  template:
+    metadata:
+      labels: { app: splitwise-quic }
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532 # make the PVC writable by the non-root user
+      containers:
+        - name: splitwise-quic
+          image: splitwise-quic:latest
+          imagePullPolicy: IfNotPresent
+          args:
+            - "-addr=:4433"
+            - "-db=/data/splitwise.db"
+            - "-uploads=/data/uploads"
+          env:
+            - name: REQUIRE_MTLS
+              value: "0"
+          ports:
+            - { name: https-tcp, containerPort: 4433, protocol: TCP }
+            - { name: quic-udp, containerPort: 4433, protocol: UDP }
+          readinessProbe:
+            httpGet: { path: /healthz, port: 4433, scheme: HTTPS }
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /healthz, port: 4433, scheme: HTTPS }
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          resources:
+            requests: { cpu: "50m", memory: "64Mi" }
+            limits: { cpu: "500m", memory: "256Mi" }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - { name: data, mountPath: /data }
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: splitwise-quic-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: splitwise-quic
+  namespace: splitwise-quic
+  labels: { app: splitwise-quic }
+spec:
+  type: LoadBalancer
+  selector: { app: splitwise-quic }
+  ports:
+    - { name: https-tcp, port: 4433, targetPort: 4433, protocol: TCP }
+    - { name: quic-udp, port: 4433, targetPort: 4433, protocol: UDP }
