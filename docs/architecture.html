@@ -141,9 +141,9 @@ sequenceDiagram
     H3->>MW: route + verify session cookie
     MW->>HD: authorized request
     HD->>HD: parse amount, currency, split inputs
-    HD->>SP: Compute(total, splitType, inputs)
-    SP-->>HD: per-user shares (exact sum)
-    HD->>ST: CreateExpense(expense, shares)
+    HD->>ST: CreateExpense(expense, inputs)
+    ST->>SP: Compute(total, splitType, inputs)
+    SP-->>ST: per-user shares (exact sum)
     ST->>DB: INSERT expense + shares (tx)
     DB-->>ST: ok
     HD->>ST: LogActivity(...)
@@ -236,7 +236,9 @@ erDiagram
     GROUPS ||--o{ ACTIVITIES : has
     USERS ||--o{ EXPENSES : pays
     EXPENSES ||--o{ EXPENSE_SHARES : split_into
+    EXPENSES ||--o{ COMMENTS : has
     USERS ||--o{ EXPENSE_SHARES : owes
+    USERS ||--o{ COMMENTS : writes
 
     USERS {
         text id PK
@@ -261,6 +263,7 @@ erDiagram
         int amount "minor units"
         text currency
         text split_type
+        text receipt_path
     }
     EXPENSE_SHARES {
         text expense_id FK
@@ -280,6 +283,12 @@ erDiagram
         text group_id FK
         text actor_id FK
         text verb
+    }
+    COMMENTS {
+        text id PK
+        text expense_id FK
+        text user_id FK
+        text body
     }
         </pre>
       </div>

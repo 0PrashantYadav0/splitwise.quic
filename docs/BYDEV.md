@@ -160,13 +160,12 @@ It's a Splitwise clone — track who paid for what in a group, automatically cal
 
 4. handlers/actions.go createExpense()
    ├─ Parses form (description, amount, currency, split_type, who's included)
-   ├─ Calls splits.Compute() — pure math, zero penny loss
-   ├─ store.CreateExpense() — DB transaction: INSERT expense + INSERT shares
-   ├─ store.CreateActivity() — logs "Alice added expense Dinner"
+   ├─ store.CreateExpense() — calls splits.Compute() (pure math), then DB transaction: INSERT expense + INSERT shares
+   ├─ store.LogActivity() — logs "Alice added expense Dinner"
    └─ hub.Publish(groupID, event) — fans out to all subscribers
 
 5. realtime hub fires the event
-   ├─ SSE handler: writes "event: update\ndata: ...\n\n" to long-lived TCP stream
+   ├─ SSE handler: writes "event: update\ndata: ...\n\n" to a long-lived HTTP response stream (TCP or QUIC)
    └─ WebTransport handler: session.SendDatagram([]byte(msg)) over QUIC
 
 6. Browser receives update (WebTransport or SSE)

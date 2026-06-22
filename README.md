@@ -148,7 +148,7 @@ This project intentionally stacks the "hard" parts of QUIC into one app:
 - **Auth** — email/password with bcrypt hashing + opaque session cookies
 - **Groups** — create groups, add members
 - **Expenses** with four split modes:
-  - **Equal** — divided evenly, leftover cents distributed deterministically
+  - **Equal** — divided evenly; leftover cents go to the first participants
   - **Exact** — explicit amounts that must reconcile to the total
   - **Percentage** — basis-point precision, must total 100%
   - **Shares** — weighted (e.g. 2:1 => two-thirds / one-third)
@@ -255,7 +255,8 @@ splitwise-quic/
 ├── deploy/
 │   └── k8s.yaml             # Kubernetes Deployment + Service + PVC
 ├── docs/
-│   └── architecture.html    # interactive Mermaid architecture diagrams
+│   ├── architecture.html    # interactive Mermaid architecture diagrams
+│   └── BYDEV.md             # technology glossary + layer-by-layer guide
 ├── Dockerfile               # multi-stage, distroless, non-root
 ├── docker-compose.yml
 └── README.md
@@ -289,9 +290,9 @@ mutation, and every subscriber (SSE stream or WT session) fans it out.
 ### Money, the right way
 
 All amounts are stored as **integer minor units** (cents). Floating point only
-appears at the input-parsing boundary. Splits distribute any rounding remainder
-one cent at a time to the largest fractional parts — so shares **always** sum to
-the exact total.
+appears at the input-parsing boundary. **Equal** splits give leftover cents to
+the first participants; **percentage** and **shares** use largest-remainder
+rounding — so shares **always** sum to the exact total.
 
 ### Debt simplification
 
@@ -345,7 +346,7 @@ go vet ./...         # static analysis
 ```
 
 The test suite covers: guard conditions (zero/negative total, empty inputs, duplicate user,
-negative values, overflow), equal-split penny distribution, exact-split reconciliation,
+negative values), equal-split penny distribution, exact-split reconciliation,
 percentage basis points, weighted shares, heap reorder after partial payment, and
 minimal-transfer guarantees for multi-creditor/debtor groups.
 
