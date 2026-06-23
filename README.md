@@ -380,16 +380,6 @@ minimal-transfer guarantees for multi-creditor/debtor groups.
 
 ---
 
-##  Roadmap
-
-- [x] Expense editing & comments
-- [x] Receipt photo uploads (over QUIC streams)
-- [x] Per-user push notifications via datagrams
-- [x] CSV / PDF export
-- [x] Dockerfile + deployment manifest
-
----
-
 <div align="center">
 
 Built over QUIC, one penny at a time. 
